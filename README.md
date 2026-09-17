@@ -40,6 +40,8 @@ python tools/set_freed_target.py --camera 192.168.15.236 --target-port 40100
 
 # 2. Run the server
 python tail2_freed_server.py
+#   (on Windows: double-click run_server.cmd instead -- same thing, keeps a
+#    console open with the live stats)
 #   listening on 0.0.0.0:40100
 #     -> livelink 127.0.0.1:40000    raw D1
 #     -> tap      127.0.0.1:40101    ASCII pose
