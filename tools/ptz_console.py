@@ -17,11 +17,13 @@ Rolls: the panel shows two rows. ROLL camera (FreeD) is the head's own roll
 from the camera's stream -- this head has no roll axis, so it stays ~0.00 by
 design. ROLL lens is the lens roll bias Q / E step: image side, -10..+10
 degrees in 1-degree steps (20 across the range). START / STOP SERVER (buttons,
-or N / M): START probes /health and, if nothing answers, launches
-tail2_freed_server.py -- the repo copy next to this file first, else
-M:\tail2-freed-server -- detached, output appended to server.log /
-server.err.log beside the script. STOP verifies /health, finds the process
-holding the server's UDP port and kills it. Quit: window close.
+or N / M): START probes /health and finds who holds the server port -- if
+anything else does (the engine's own D1 listener owns 40100 while OBSBOT_VP
+runs), it refuses by name; otherwise it launches tail2_freed_server.py (the
+repo copy next to this file first, else M:\tail2-freed-server), detached,
+with output appended to server.log / server.err.log beside the script. STOP
+verifies /health before killing; with no server it cleans up only its own
+stalled spawn and leaves other port holders alone. Quit: window close.
 
 Stdlib only (tkinter + urllib). Close-loop needs the fan-out server running --
 the status light says so plainly if it is not.
@@ -114,6 +116,8 @@ class Console:
         self._had_feed = False
         self.server_alive = None         # last /health probe (None = not probed yet)
         self._server_ui = None           # last applied button-tint state
+        self.port_holder = None          # who holds 40100 while the server is down
+        self._port_holder_pid = -1
 
         self._build()
         threading.Thread(target=self._pose_loop, daemon=True).start()
@@ -415,25 +419,74 @@ class Console:
                     pass
         return sorted(pids)
 
-    def _stop_server(self):
-        """Kill the fan-out server -- but only after verifying it with /health.
+    def _process_name(self, pid):
+        """Image name for a pid (tasklist), or '' -- for honest messages."""
+        if not pid:
+            return ""
+        try:
+            result = subprocess.run(["tasklist", "/FI", "pid eq %d" % pid, "/FO", "CSV", "/NH"],
+                                    capture_output=True, text=True, timeout=5,
+                                    creationflags=0x08000000)   # CREATE_NO_WINDOW
+            first = result.stdout.strip().splitlines()[0] if result.stdout.strip() else ""
+            if first.startswith('"'):
+                return first.split('","')[0].strip('"')
+        except Exception:
+            pass
+        return ""
 
-        The process is found by who holds the server's UDP port (netstat), so
-        this works whether or not this console started it; a remembered PID
-        is never trusted on its own. Bound to the M key.
+    def _is_our_child(self, pid):
+        """True if the pid is a live process whose parent is this console.
+
+        That is the verification a remembered PID needs before a kill: the
+        server we spawn is our child, so nothing else can be killed by a
+        recycled PID.
+        """
+        if not pid:
+            return False
+        try:
+            ps = "(Get-CimInstance Win32_Process -Filter \"ProcessId=%d\").ParentProcessId" % pid
+            result = subprocess.run(["powershell", "-NoProfile", "-Command", ps],
+                                    capture_output=True, text=True, timeout=8,
+                                    creationflags=0x08000000)
+            return result.stdout.strip() == str(os.getpid())
+        except Exception:
+            return False
+
+    def _port_holder(self, port):
+        """(pid, name) of whoever holds a UDP port, or (0, '')."""
+        pids = self._port_owner_pids(port)
+        if not pids:
+            return 0, ""
+        return pids[0], self._process_name(pids[0])
+
+    def _stop_server(self):
+        """Kill the fan-out server -- but only after verifying what it is.
+
+        A healthy server is found by who holds its UDP port (netstat). With no
+        /health, only a remembered PID that is verifiably this console's own
+        child gets cleaned up; anything else on the port (the engine!) is left
+        alone, by name. Bound to the M key.
         """
         def run():
             health = self._health_url()
             status, _ = rest(health, timeout=0.8)
             owners = self._port_owner_pids(SERVER_PORT)
             if status != 200:
+                cleaned = ""
+                if self._server_pid and self._is_our_child(self._server_pid):
+                    subprocess.run(["taskkill", "/F", "/PID", str(self._server_pid)],
+                                   capture_output=True, text=True, timeout=8,
+                                   creationflags=0x08000000)
+                    cleaned = "; cleaned up stalled spawn (pid %d)" % self._server_pid
+                self._server_pid = 0
+                owners = self._port_owner_pids(SERVER_PORT)
                 if owners:
-                    self._set_status("no /health on %s; port %d held by pid(s) %s - not killed "
-                                     "(could not verify it is the server)"
-                                     % (health, SERVER_PORT, ", ".join(map(str, owners))))
+                    pid, name = self._port_holder(SERVER_PORT)
+                    self._set_status("no /health; port %d held by %s (pid %d) - left alone%s"
+                                     % (SERVER_PORT, name or "?", pid, cleaned))
                 else:
-                    self._set_status("server not running (%s silent, port %d free)"
-                                     % (health, SERVER_PORT))
+                    self._set_status("server not running (port %d free)%s"
+                                     % (SERVER_PORT, cleaned))
                 return
             pids = set(owners)
             if not pids and self._server_pid:
@@ -462,11 +515,13 @@ class Console:
     def _start_server(self):
         """Launch tail2_freed_server.py when the pose feed is not answering.
 
-        Probes /health first, so a live server is never doubled. Otherwise it
-        finds the server script (repo layout next to this file, then the known
-        share paths) and starts it detached -- pythonw, so no console window
-        appears -- with its output appended to server.log / server.err.log
-        beside the script. Also bound to the N key.
+        Probes /health first, so a live server is never doubled, then checks
+        the port: if something else already holds 40100 (usually the engine's
+        own D1 listener while OBSBOT_VP runs) a spawn could only die, so it
+        refuses and names the holder. Otherwise it finds the server script
+        (repo layout next to this file, then the known share paths) and starts
+        it detached -- pythonw, no console window -- with output appended to
+        server.log / server.err.log beside the script. Also bound to the N key.
         """
         def run():
             health = self._health_url()
@@ -474,6 +529,18 @@ class Console:
             if status == 200:
                 self._set_status("server already running (%s -> %s)"
                                  % (health, str(body).strip() or "200"))
+                return
+            # The port is the hard constraint: refuse before spawning into a
+            # bind that can only fail with WinError 10048.
+            pid, name = self._port_holder(SERVER_PORT)
+            if pid:
+                if name.lower().startswith("unreal"):
+                    self._set_status("not starting: port %d is the engine's D1 listener "
+                                     "(UnrealEditor, pid %d) - control only while OBSBOT_VP runs"
+                                     % (SERVER_PORT, pid))
+                else:
+                    self._set_status("not starting: port %d already held by %s (pid %d)"
+                                     % (SERVER_PORT, name or "?", pid))
                 return
             here = os.path.dirname(os.path.abspath(__file__))
             candidates = [os.path.normpath(os.path.join(here, "..", "tail2_freed_server.py")),
@@ -551,6 +618,13 @@ class Console:
 
             status, _ = rest(self._health_url(), timeout=1.0)
             self.server_alive = (status == 200)
+            if self.server_alive:
+                self.port_holder = None
+            else:
+                pid, name = self._port_holder(SERVER_PORT)
+                if pid != self._port_holder_pid:
+                    self._port_holder_pid = pid
+                    self.port_holder = (name or ("pid %d" % pid)) if pid else None
 
             status, body = rest(self._cam() + "/ptz/rollbias", "GET", timeout=1.5)
             if (status == 200 and isinstance(body, dict) and "angle" in body
@@ -650,6 +724,9 @@ class Console:
                 if self._server_started and (time.time() - self._server_started) < 25.0:
                     self.status.configure(text="server starting (pid %d) - waiting for the pose feed..."
                                           % self._server_pid)
+                elif self.port_holder:
+                    self.status.configure(text="no pose feed - port %d held by %s: engine mode, "
+                                          "the console has control only" % (SERVER_PORT, self.port_holder))
                 else:
                     self.status.configure(text="no pose feed (%s) - hit START SERVER, or is "
                                           "tail2_freed_server.py running?" % self.pose_error)

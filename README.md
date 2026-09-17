@@ -97,12 +97,16 @@ python tools/camera_home.py --zoom 2.0   # PUT /ptz/zoom {"ratio": 2.0, "speed":
   **off / waiting for a person / on** and goes green the moment tracking
   really engages. The mode value is `humanTrackingSingleMode` (the old
   script's `normalTrack` is not one of the camera's modes). **START / STOP
-  SERVER** buttons (or `N` / `M`) probe `/health`: START launches this server
-  if nothing answers (the repo copy beside the console first, else the share
-  paths; detached; logs appended beside the script), STOP verifies health,
-  finds the process holding UDP 40100 via netstat and taskkills it; the
-  buttons tint with liveness. Deploy or refresh the Desktop copies with
-  `tools\deploy_console.cmd` — it writes both files there from this repo copy.
+  SERVER** buttons (or `N` / `M`) probe `/health`: START refuses if UDP 40100
+  is already held — the engine's own D1 listener owns it while `OBSBOT_VP`
+  runs, and the console then shows "engine mode, control only" instead of
+  chasing a server that cannot start — otherwise it launches this server (the
+  repo copy beside the console first, else the share paths; detached; logs
+  appended beside the script). STOP verifies health before killing; with no
+  server running it cleans up only its own stalled spawn and leaves other
+  port holders alone, by name. The buttons tint with liveness. Deploy or
+  refresh the Desktop copies with `tools\deploy_console.cmd` — it writes both
+  files there from this repo copy.
 
 Home is `POST /camera/sdk/ptz/reset` — a route that **is not in the vendor's
 RESTful HTML document**. It was found in the camera's own shipped web app
