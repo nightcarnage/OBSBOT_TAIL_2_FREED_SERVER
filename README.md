@@ -86,7 +86,10 @@ python tools/camera_home.py --zoom 2.0   # PUT /ptz/zoom {"ratio": 2.0, "speed":
 
 * `ptz_console.py` — the desktop console (copy on the Windows Desktop as
   `OBSBOT_TAIL_2 PTZ_CLOSED_LOOP.pyw`, with a `.bat` launcher): live pose
-  readout (yaw/pitch/roll, X/Y/Z, zoom/focal) from this server's `/pose`,
+  readout (yaw/pitch, X/Y/Z, zoom/focal) from this server's `/pose` and **two
+  roll rows** — `ROLL camera (FreeD)`: the head's own roll (this head has no
+  roll axis, so it stays ~0.00 by design), and `ROLL lens`: the lens roll bias
+  driven by Q/E (1° steps over ±10°). Also:
   hold-to-drive arrows (+ WASD), STOP, zoom presets and 0.1 steps, the
   **HOME** button, and an AI-tracking toggle that tells the truth — the camera
   answers `200` to `PUT /ai/workmode` even with nobody in view and keeps
