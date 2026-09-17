@@ -13,7 +13,8 @@ actual pose while you drive it:
 Drive: hold the on-screen arrows, or W/A/S/D + arrow keys. The gimbal gets a
 fresh speed command ~8x per second while held, and one stop when released.
 Home: the big button (or H). Zoom: presets or the 0.1 steps (or Z / X).
-Quit: Q or the window close button.
+Roll: Q / E step the lens roll bias (the head has no roll axis -- the bias is
+image side, -10..+10 degrees, shown on the pose panel). Quit: window close.
 
 Stdlib only (tkinter + urllib). Close-loop needs the fan-out server running --
 the status light says so plainly if it is not.
@@ -35,6 +36,8 @@ POSE_HZ = 10         # pose polls per second
 ZOOM_STEP = 0.1
 ZOOM_MIN, ZOOM_MAX = 1.0, 4.0
 ZOOM_SPEED = 3
+ROLL_STEP = 10.0
+ROLL_MIN, ROLL_MAX = -10.0, 10.0
 
 BG, PANEL, PANEL2 = "#14171a", "#1e242b", "#262d36"
 FG, DIM = "#e6edf3", "#8b98a5"
@@ -85,6 +88,8 @@ class Console:
         self.track_request = None        # None = follow the camera; True/False = the user's wish
         self._track_request_time = 0.0
         self._track_state = None         # last shown state: off | waiting | on
+        self.roll_bias = 0.0             # lens roll bias in degrees (-10..+10)
+        self._roll_grace = 0.0
 
         self._build()
         threading.Thread(target=self._pose_loop, daemon=True).start()
@@ -127,6 +132,7 @@ class Console:
         self.l_xyz = self._small_row(left, 5)
         self.l_zoom = self._small_row(left, 6)
         self.l_age = self._small_row(left, 7)
+        self.l_rollbias = self._small_row(left, 8)
 
         right = tk.Frame(body, bg=PANEL)
         right.grid(row=0, column=1, sticky="nsew")
@@ -174,7 +180,7 @@ class Console:
         self.status = tk.Label(root, text="ready", bg=BG, fg=DIM, font=UI,
                                anchor="w")
         self.status.pack(fill="x", padx=12, pady=(0, 2))
-        tk.Label(root, text="keys: WASD/arrows drive · space stop · H home · Z/X zoom · Q quit",
+        tk.Label(root, text="keys: WASD/arrows drive · space stop · H home · Z/X zoom · Q/E roll ±10°",
                  bg=BG, fg=DIM, font=UI, anchor="w").pack(fill="x", padx=12, pady=(0, 8))
 
         root.bind("<KeyPress>", self._key_down)
@@ -246,7 +252,9 @@ class Console:
         elif key == "x":
             self._zoom_step(-ZOOM_STEP)
         elif key == "q":
-            self._quit()
+            self._roll_step(-ROLL_STEP)
+        elif key == "e":
+            self._roll_step(+ROLL_STEP)
 
     def _key_up(self, event):
         key = event.keysym.lower()
@@ -292,6 +300,20 @@ class Console:
 
     def _zoom_step(self, delta):
         self._zoom_set(self.zoom_target + delta)
+
+    def _roll_step(self, delta):
+        """Lens roll bias, -10..+10 degrees (the gimbal itself has no roll axis).
+
+        Relative steps: from 0, Q -> -10, then E takes it back to 0, again to
+        +10 -- so every extreme is reachable and centering is one press away.
+        """
+        self.roll_bias = max(ROLL_MIN, min(ROLL_MAX, round(self.roll_bias + delta, 1)))
+        self._roll_grace = time.time() + 2.0
+
+        def run():
+            status, body = rest(self._cam() + "/ptz/rollbias", "PUT", {"angle": self.roll_bias})
+            self._set_status("roll bias -> %+.0f° : %s %s" % (self.roll_bias, status, body or ""))
+        self._fire(run)
 
     def _toggle_tracking(self):
         # If the rig is on (or waiting for a subject), the next click turns it
@@ -354,11 +376,19 @@ class Console:
             time.sleep(0.04)
 
     def _mode_loop(self):
-        """Read the camera's real AI workmode so the button shows the truth."""
+        """Read the camera's real AI workmode and roll bias so the UI shows truth."""
         while True:
             status, body = rest(self._cam() + "/ai/workmode", "GET", timeout=1.5)
             if status == 200 and isinstance(body, dict):
                 self.mode_remote = str(body.get("mode", ""))
+
+            status, body = rest(self._cam() + "/ptz/rollbias", "GET", timeout=1.5)
+            if (status == 200 and isinstance(body, dict) and "angle" in body
+                    and time.time() > self._roll_grace):
+                try:
+                    self.roll_bias = max(ROLL_MIN, min(ROLL_MAX, float(body["angle"])))
+                except (TypeError, ValueError):
+                    pass
             time.sleep(2.0)
 
     # ------------------------------------------------------------- repaint
@@ -396,6 +426,9 @@ class Console:
             for label in (self.l_yaw, self.l_pitch, self.l_roll,
                           self.l_xyz, self.l_zoom, self.l_age):
                 label.configure(text="—")
+
+        # the lens roll bias is known regardless of pose availability
+        self.l_rollbias.configure(text="ROLL BIAS (lens): %+.0f°" % self.roll_bias)
 
         # tracking button mirrors the camera's real state, in three flavours:
         # off / waiting for a person / on. The camera reports "none" while it has
