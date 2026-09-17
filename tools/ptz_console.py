@@ -36,7 +36,7 @@ POSE_HZ = 10         # pose polls per second
 ZOOM_STEP = 0.1
 ZOOM_MIN, ZOOM_MAX = 1.0, 4.0
 ZOOM_SPEED = 3
-ROLL_STEP = 10.0
+ROLL_STEP = 1.0
 ROLL_MIN, ROLL_MAX = -10.0, 10.0
 
 BG, PANEL, PANEL2 = "#14171a", "#1e242b", "#262d36"
@@ -304,8 +304,9 @@ class Console:
     def _roll_step(self, delta):
         """Lens roll bias, -10..+10 degrees (the gimbal itself has no roll axis).
 
-        Relative steps: from 0, Q -> -10, then E takes it back to 0, again to
-        +10 -- so every extreme is reachable and centering is one press away.
+        1-degree steps: 20 steps across the range, centre (0) to each extreme.
+        Holding Q or E repeats -- the OS auto-repeat keeps feeding steps -- so
+        sweeping end to end is a key-hold rather than twenty presses.
         """
         self.roll_bias = max(ROLL_MIN, min(ROLL_MAX, round(self.roll_bias + delta, 1)))
         self._roll_grace = time.time() + 2.0
