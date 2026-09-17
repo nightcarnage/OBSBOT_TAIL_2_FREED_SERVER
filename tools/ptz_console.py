@@ -16,14 +16,22 @@ Home: the big button (or H). Zoom: presets or the 0.1 steps (or Z / X).
 Rolls: the panel shows two rows. ROLL camera (FreeD) is the head's own roll
 from the camera's stream -- this head has no roll axis, so it stays ~0.00 by
 design. ROLL lens is the lens roll bias Q / E step: image side, -10..+10
-degrees in 1-degree steps (20 across the range). Quit: window close.
+degrees in 1-degree steps (20 across the range). START / STOP SERVER (buttons,
+or N / M): START probes /health and, if nothing answers, launches
+tail2_freed_server.py -- the repo copy next to this file first, else
+M:\tail2-freed-server -- detached, output appended to server.log /
+server.err.log beside the script. STOP verifies /health, finds the process
+holding the server's UDP port and kills it. Quit: window close.
 
 Stdlib only (tkinter + urllib). Close-loop needs the fan-out server running --
 the status light says so plainly if it is not.
 """
 
 import json
+import os
 import queue
+import subprocess
+import sys
 import threading
 import time
 import tkinter as tk
@@ -32,6 +40,15 @@ import urllib.request
 
 CAMERA_IP = "192.168.15.236"
 POSE_URL = "http://127.0.0.1:40110/pose"
+
+# START SERVER fallbacks: the repo copy is found relative to this file first
+# (works when the console runs from the repo's tools/); these cover the
+# deployed .pyw on the Desktop, where there is no repo next to it.
+SERVER_CANDIDATES = [
+    r"M:\tail2-freed-server\tail2_freed_server.py",
+    r"\\192.168.15.250\data\obsbot_virtual_production_v2_0\OBSBOT_VirtualProduction_V2.0\tail2-freed-server\tail2_freed_server.py",
+]
+SERVER_PORT = 40100   # the fan-out server's D1 listen port (--listen default)
 
 HOLD_HZ = 8          # gimbal speed refreshes per second while a direction is held
 POSE_HZ = 10         # pose polls per second
@@ -92,6 +109,11 @@ class Console:
         self._track_state = None         # last shown state: off | waiting | on
         self.roll_bias = 0.0             # lens roll bias in degrees (-10..+10)
         self._roll_grace = 0.0
+        self._server_pid = 0             # last server spawned from the button
+        self._server_started = 0.0
+        self._had_feed = False
+        self.server_alive = None         # last /health probe (None = not probed yet)
+        self._server_ui = None           # last applied button-tint state
 
         self._build()
         threading.Thread(target=self._pose_loop, daemon=True).start()
@@ -186,13 +208,24 @@ class Console:
         track = tk.Button(right, text="AI tracking: off", command=self._toggle_tracking,
                           bg=PANEL2, fg=DIM, activebackground=PANEL2,
                           font=UI, relief="flat")
-        track.grid(row=7, column=0, columnspan=3, sticky="ew", padx=10, pady=(2, 8))
+        track.grid(row=7, column=0, columnspan=3, sticky="ew", padx=10, pady=(2, 2))
         self.track_btn = track
+
+        servers = tk.Frame(right, bg=PANEL)
+        servers.grid(row=8, column=0, columnspan=3, sticky="ew", padx=10, pady=(0, 8))
+        self.server_btn = tk.Button(servers, text="▶  START SERVER", command=self._start_server,
+                                    bg=PANEL2, fg=GOOD, activebackground=GOOD, activeforeground=BG,
+                                    font=UI, relief="flat")
+        self.server_btn.pack(side="left", fill="x", expand=True)
+        self.stop_btn = tk.Button(servers, text="■  STOP SERVER", command=self._stop_server,
+                                  bg=PANEL2, fg=BAD, activebackground=BAD, activeforeground=BG,
+                                  font=UI, relief="flat")
+        self.stop_btn.pack(side="left", fill="x", expand=True, padx=(6, 0))
 
         self.status = tk.Label(root, text="ready", bg=BG, fg=DIM, font=UI,
                                anchor="w")
         self.status.pack(fill="x", padx=12, pady=(0, 2))
-        tk.Label(root, text="keys: WASD/arrows drive · space stop · H home · Z/X zoom · Q/E lens roll 1° (±10)",
+        tk.Label(root, text="keys: WASD/arrows drive · space stop · H home · Z/X zoom · Q/E lens roll 1° (±10) · N/M server start/stop",
                  bg=BG, fg=DIM, font=UI, anchor="w").pack(fill="x", padx=12, pady=(0, 8))
 
         root.bind("<KeyPress>", self._key_down)
@@ -267,6 +300,10 @@ class Console:
             self._roll_step(-ROLL_STEP)
         elif key == "e":
             self._roll_step(+ROLL_STEP)
+        elif key == "n":
+            self._start_server()
+        elif key == "m":
+            self._stop_server()
 
     def _key_up(self, event):
         key = event.keysym.lower()
@@ -355,6 +392,115 @@ class Console:
             self._set_status("AI tracking %s -> %s %s" % ("ON" if want_on else "off", status, body or ""))
         self._fire(run)
 
+    def _health_url(self):
+        """The pose feed's URL with /pose swapped for /health."""
+        base = self.pose_url.get().strip()
+        return base[:-5] + "/health" if base.endswith("/pose") else base
+
+    def _port_owner_pids(self, port):
+        """PIDs holding a UDP port -- via netstat, since stdlib has no socket->pid."""
+        try:
+            result = subprocess.run(["netstat", "-ano", "-p", "udp"],
+                                    capture_output=True, text=True, timeout=5,
+                                    creationflags=0x08000000)   # CREATE_NO_WINDOW
+        except Exception:
+            return []
+        pids = set()
+        for line in result.stdout.splitlines():
+            parts = line.split()
+            if len(parts) >= 4 and parts[0].startswith("UDP") and parts[1].endswith(":%d" % port):
+                try:
+                    pids.add(int(parts[-1]))
+                except ValueError:
+                    pass
+        return sorted(pids)
+
+    def _stop_server(self):
+        """Kill the fan-out server -- but only after verifying it with /health.
+
+        The process is found by who holds the server's UDP port (netstat), so
+        this works whether or not this console started it; a remembered PID
+        is never trusted on its own. Bound to the M key.
+        """
+        def run():
+            health = self._health_url()
+            status, _ = rest(health, timeout=0.8)
+            owners = self._port_owner_pids(SERVER_PORT)
+            if status != 200:
+                if owners:
+                    self._set_status("no /health on %s; port %d held by pid(s) %s - not killed "
+                                     "(could not verify it is the server)"
+                                     % (health, SERVER_PORT, ", ".join(map(str, owners))))
+                else:
+                    self._set_status("server not running (%s silent, port %d free)"
+                                     % (health, SERVER_PORT))
+                return
+            pids = set(owners)
+            if not pids and self._server_pid:
+                pids.add(self._server_pid)
+            if not pids:
+                self._set_status("server answers on %s but no killable pid found "
+                                 "(started on a non-default port?)" % health)
+                return
+            killed = []
+            for pid in sorted(pids):
+                result = subprocess.run(["taskkill", "/F", "/T", "/PID", str(pid)],
+                                        capture_output=True, text=True, timeout=8,
+                                        creationflags=0x08000000)
+                killed.append(str(pid) if result.returncode == 0 else "%d failed" % pid)
+            self._server_pid = 0
+            time.sleep(0.8)
+            status, _ = rest(health, timeout=0.8)
+            if status == 200:
+                self._set_status("server stop FAILED - %s still answering (tried: %s)"
+                                 % (health, ", ".join(killed)))
+            else:
+                self._set_status("server stopped (%s) - pose feed down until restarted"
+                                 % ", ".join(killed))
+        self._fire(run)
+
+    def _start_server(self):
+        """Launch tail2_freed_server.py when the pose feed is not answering.
+
+        Probes /health first, so a live server is never doubled. Otherwise it
+        finds the server script (repo layout next to this file, then the known
+        share paths) and starts it detached -- pythonw, so no console window
+        appears -- with its output appended to server.log / server.err.log
+        beside the script. Also bound to the N key.
+        """
+        def run():
+            health = self._health_url()
+            status, body = rest(health, timeout=0.8)
+            if status == 200:
+                self._set_status("server already running (%s -> %s)"
+                                 % (health, str(body).strip() or "200"))
+                return
+            here = os.path.dirname(os.path.abspath(__file__))
+            candidates = [os.path.normpath(os.path.join(here, "..", "tail2_freed_server.py")),
+                          os.path.normpath(os.path.join(here, "tail2_freed_server.py"))]
+            candidates += SERVER_CANDIDATES
+            script = next((c for c in candidates if os.path.isfile(c)), None)
+            if script is None:
+                self._set_status("server script not found - looked for: %s"
+                                 % "  |  ".join(candidates))
+                return
+            directory = os.path.dirname(script)
+            try:
+                out = open(os.path.join(directory, "server.log"), "ab")
+                err = open(os.path.join(directory, "server.err.log"), "ab")
+                flags = 0x00000008 | 0x00000200   # DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP
+                proc = subprocess.Popen([sys.executable, script], cwd=directory,
+                                        stdin=subprocess.DEVNULL, stdout=out, stderr=err,
+                                        creationflags=flags, close_fds=True)
+                out.close()
+                err.close()
+                self._server_pid = proc.pid
+                self._server_started = time.time()
+                self._set_status("server started (pid %d), logs in %s" % (proc.pid, directory))
+            except Exception as exc:
+                self._set_status("server start FAILED: %s: %s" % (type(exc).__name__, exc))
+        self._fire(run)
+
     def _quit(self):
         self._fire(self._gimbal, 0, 0, True)
         self.root.after(120, self.root.destroy)
@@ -397,11 +543,14 @@ class Console:
             time.sleep(0.04)
 
     def _mode_loop(self):
-        """Read the camera's real AI workmode and roll bias so the UI shows truth."""
+        """Read workmode, roll bias and server health so the UI shows truth."""
         while True:
             status, body = rest(self._cam() + "/ai/workmode", "GET", timeout=1.5)
             if status == 200 and isinstance(body, dict):
                 self.mode_remote = str(body.get("mode", ""))
+
+            status, _ = rest(self._health_url(), timeout=1.0)
+            self.server_alive = (status == 200)
 
             status, body = rest(self._cam() + "/ptz/rollbias", "GET", timeout=1.5)
             if (status == 200 and isinstance(body, dict) and "angle" in body
@@ -425,6 +574,11 @@ class Console:
         # pose panel
         pose = self.pose
         have = pose is not None
+        fresh = have and (time.time() - self.pose_wall) < 1.0
+        if fresh and not self._had_feed:
+            self._set_status("pose feed up (%d packets from the fan-out server)"
+                             % pose.get("packets", 0))
+        self._had_feed = fresh
         if have:
             self.l_yaw.configure(text="%+.2f°" % pose.get("yaw", 0.0))
             self.l_pitch.configure(text="%+.2f°" % pose.get("pitch", 0.0))
@@ -476,16 +630,29 @@ class Console:
             else:
                 self.track_btn.configure(text="AI tracking: off", fg=DIM)
 
-        # stream light
-        if have and pose.get("age_s", 99) < 0.5:
+        # server buttons mirror liveness (probed every 2 s in _mode_loop):
+        # START lights up while the server is down, STOP while it is up.
+        if self.server_alive is not None and self.server_alive != self._server_ui:
+            self._server_ui = self.server_alive
+            self.server_btn.configure(fg=DIM if self.server_alive else GOOD)
+            self.stop_btn.configure(fg=BAD if self.server_alive else DIM)
+
+        # stream light (wall-clock freshness: a stale pose means the server
+        # stopped, whatever the last sample's own age said)
+        age = time.time() - self.pose_wall
+        if fresh:
             self.light.configure(fg=GOOD)
-        elif have and pose.get("age_s", 99) < 3.0:
+        elif age < 3.0:
             self.light.configure(fg=WARN)
         else:
             self.light.configure(fg=BAD)
-            if not have and self.pose_error:
-                self.status.configure(text="no pose feed (%s) — is tail2_freed_server.py running?"
-                                      % self.pose_error)
+            if self.pose_error:
+                if self._server_started and (time.time() - self._server_started) < 25.0:
+                    self.status.configure(text="server starting (pid %d) - waiting for the pose feed..."
+                                          % self._server_pid)
+                else:
+                    self.status.configure(text="no pose feed (%s) - hit START SERVER, or is "
+                                          "tail2_freed_server.py running?" % self.pose_error)
 
         self.root.after(80, self._refresh)
 

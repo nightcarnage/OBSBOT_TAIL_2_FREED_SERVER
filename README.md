@@ -96,9 +96,13 @@ python tools/camera_home.py --zoom 2.0   # PUT /ptz/zoom {"ratio": 2.0, "speed":
   reporting `none` until it actually sees a person, so the button shows
   **off / waiting for a person / on** and goes green the moment tracking
   really engages. The mode value is `humanTrackingSingleMode` (the old
-  script's `normalTrack` is not one of the camera's modes). Deploy or refresh
-  the Desktop copies with `tools\deploy_console.cmd` — it writes both files
-  there from this repo copy.
+  script's `normalTrack` is not one of the camera's modes). **START / STOP
+  SERVER** buttons (or `N` / `M`) probe `/health`: START launches this server
+  if nothing answers (the repo copy beside the console first, else the share
+  paths; detached; logs appended beside the script), STOP verifies health,
+  finds the process holding UDP 40100 via netstat and taskkills it; the
+  buttons tint with liveness. Deploy or refresh the Desktop copies with
+  `tools\deploy_console.cmd` — it writes both files there from this repo copy.
 
 Home is `POST /camera/sdk/ptz/reset` — a route that **is not in the vendor's
 RESTful HTML document**. It was found in the camera's own shipped web app
