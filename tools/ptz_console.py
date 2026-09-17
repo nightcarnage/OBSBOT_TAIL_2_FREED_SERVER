@@ -13,8 +13,10 @@ actual pose while you drive it:
 Drive: hold the on-screen arrows, or W/A/S/D + arrow keys. The gimbal gets a
 fresh speed command ~8x per second while held, and one stop when released.
 Home: the big button (or H). Zoom: presets or the 0.1 steps (or Z / X).
-Roll: Q / E step the lens roll bias (the head has no roll axis -- the bias is
-image side, -10..+10 degrees, shown on the pose panel). Quit: window close.
+Rolls: the panel shows two rows. ROLL camera (FreeD) is the head's own roll
+from the camera's stream -- this head has no roll axis, so it stays ~0.00 by
+design. ROLL lens is the lens roll bias Q / E step: image side, -10..+10
+degrees in 1-degree steps (20 across the range). Quit: window close.
 
 Stdlib only (tkinter + urllib). Close-loop needs the fan-out server running --
 the status light says so plainly if it is not.
@@ -125,14 +127,15 @@ class Console:
                  font=UI).grid(row=0, column=0, columnspan=2, sticky="w", padx=10, pady=(8, 2))
         self.l_yaw = self._pose_row(left, "YAW", 1)
         self.l_pitch = self._pose_row(left, "PITCH", 2)
-        self.l_roll = self._pose_row(left, "ROLL", 3)
+        self.l_roll_cam = self._pose_row(left, "ROLL camera (FreeD)", 3)
+        self.l_roll = self._pose_row(left, "ROLL lens (Q/E)", 4)
+        self.l_roll.configure(fg=ACCENT)     # the row Q/E actually moves
 
         sep = tk.Frame(left, bg=PANEL2, height=1)
-        sep.grid(row=4, column=0, columnspan=2, sticky="ew", padx=10, pady=6)
-        self.l_xyz = self._small_row(left, 5)
-        self.l_zoom = self._small_row(left, 6)
-        self.l_age = self._small_row(left, 7)
-        self.l_rollbias = self._small_row(left, 8)
+        sep.grid(row=5, column=0, columnspan=2, sticky="ew", padx=10, pady=6)
+        self.l_xyz = self._small_row(left, 6)
+        self.l_zoom = self._small_row(left, 7)
+        self.l_age = self._small_row(left, 8)
 
         right = tk.Frame(body, bg=PANEL)
         right.grid(row=0, column=1, sticky="nsew")
@@ -148,10 +151,19 @@ class Console:
                          font=("Segoe UI", 16, "bold"), width=3, relief="flat")
         stop.grid(row=2, column=1, padx=3, pady=3, ipady=6)
 
-        tk.Scale(right, from_=5, to=80, orient="horizontal", variable=self.speed,
-                 bg=PANEL, fg=FG, troughcolor=PANEL2, highlightthickness=0,
-                 activebackground=ACCENT, length=190, showvalue=True) \
-            .grid(row=4, column=0, columnspan=3, pady=(2, 6))
+        self.speed_scale = tk.Scale(right, from_=5, to=80, orient="horizontal",
+                                    variable=self.speed, bg=PANEL, fg=FG,
+                                    troughcolor=PANEL2, highlightthickness=0,
+                                    activebackground=ACCENT, length=190, showvalue=True)
+        self.speed_scale.grid(row=4, column=0, columnspan=3, pady=(2, 6))
+        # After using the slider, hand the keyboard back to the window: while the
+        # scale holds focus the arrow keys adjust the scale, not the gimbal.
+        self.speed_scale.bind("<ButtonRelease-1>", lambda e: self.root.focus_set())
+        # ...and route keys through our handler even while the scale has focus
+        # (the returned break stops the class binding, so when the window itself
+        # has focus -- the common case -- only the root handler fires).
+        self.speed_scale.bind("<KeyPress>", self._key_down_break)
+        self.speed_scale.bind("<KeyRelease>", self._key_up_break)
 
         zoom = tk.Frame(right, bg=PANEL)
         zoom.grid(row=5, column=0, columnspan=3, pady=2)
@@ -180,7 +192,7 @@ class Console:
         self.status = tk.Label(root, text="ready", bg=BG, fg=DIM, font=UI,
                                anchor="w")
         self.status.pack(fill="x", padx=12, pady=(0, 2))
-        tk.Label(root, text="keys: WASD/arrows drive · space stop · H home · Z/X zoom · Q/E roll ±10°",
+        tk.Label(root, text="keys: WASD/arrows drive · space stop · H home · Z/X zoom · Q/E lens roll 1° (±10)",
                  bg=BG, fg=DIM, font=UI, anchor="w").pack(fill="x", padx=12, pady=(0, 8))
 
         root.bind("<KeyPress>", self._key_down)
@@ -266,6 +278,14 @@ class Console:
             self._clear_dir(0, -1)
         elif key in ("right", "d"):
             self._clear_dir(0, +1)
+
+    def _key_down_break(self, event):
+        self._key_down(event)
+        return "break"
+
+    def _key_up_break(self, event):
+        self._key_up(event)
+        return "break"
 
     # ------------------------------------------------------------- commands
 
@@ -408,7 +428,7 @@ class Console:
         if have:
             self.l_yaw.configure(text="%+.2f°" % pose.get("yaw", 0.0))
             self.l_pitch.configure(text="%+.2f°" % pose.get("pitch", 0.0))
-            self.l_roll.configure(text="%+.2f°" % pose.get("roll", 0.0))
+            self.l_roll_cam.configure(text="%+.2f°" % pose.get("roll", 0.0))
             self.l_xyz.configure(text="X %+.1f · Y %+.1f · Z %+.1f cm"
                                  % (pose.get("x", 0.0), pose.get("y", 0.0), pose.get("z", 0.0)))
             focal = pose.get("focal", 0)
@@ -424,12 +444,15 @@ class Console:
             self.l_age.configure(text="age %.2f s · %d pkts · %.0f/s"
                                  % (pose.get("age_s", 0.0), count, self.rate))
         else:
-            for label in (self.l_yaw, self.l_pitch, self.l_roll,
+            for label in (self.l_yaw, self.l_pitch, self.l_roll_cam,
                           self.l_xyz, self.l_zoom, self.l_age):
                 label.configure(text="—")
 
-        # the lens roll bias is known regardless of pose availability
-        self.l_rollbias.configure(text="ROLL BIAS (lens): %+.0f°" % self.roll_bias)
+        # Two rolls, one row each. "ROLL camera" above is the head's own roll
+        # from the FreeD stream (this head has no roll axis -- it stays ~0.00
+        # by design). "ROLL lens" here is the lens roll bias Q/E drives; it is
+        # known even while the pose feed is down, so it always shows a number.
+        self.l_roll.configure(text="%+.0f°" % self.roll_bias)
 
         # tracking button mirrors the camera's real state, in three flavours:
         # off / waiting for a person / on. The camera reports "none" while it has
