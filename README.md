@@ -1,6 +1,6 @@
 # tail2-freed-server
 
-https://youtu.be/ihutHhKsLco
+https://youtu.be/ihutHhKsLco  (FreeD demo inside UE)
 
 One small, dependency-free Python process that takes the OBSBOT Tail 2's
 **FreeD tracking data** and serves it to everyone — **inside the engine and
