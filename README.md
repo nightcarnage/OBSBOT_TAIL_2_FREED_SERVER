@@ -1,5 +1,7 @@
 # tail2-freed-server
 
+https://youtu.be/ihutHhKsLco
+
 One small, dependency-free Python process that takes the OBSBOT Tail 2's
 **FreeD tracking data** and serves it to everyone — **inside the engine and
 outside it**.
